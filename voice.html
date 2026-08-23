@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atima's Menu</title>
+  <style>
+    :root { font-family: -apple-system, Roboto, Arial, sans-serif; }
+    body { margin: 0; background: #faf7f2; color: #2a2a2a; }
+    header { background: #7a2e2e; color: #fff; padding: 16px; text-align: center; }
+    header h1 { margin: 0; font-size: 20px; }
+    #setupWarning {
+      display: none; background: #fff3cd; color: #664d03; padding: 12px 16px;
+      font-size: 13px; border-bottom: 2px solid #e0a800;
+    }
+    .tabs { display: flex; }
+    .tabs button { flex: 1; padding: 12px; border: none; background: #eee; font-size: 15px; }
+    .tabs button.active { background: #7a2e2e; color: #fff; font-weight: bold; }
+    .view { display: none; padding: 16px; padding-bottom: 60px; }
+    .view.active { display: block; }
+    label { display: block; margin: 12px 0 4px; font-weight: bold; font-size: 13px; color: #555; }
+    select, textarea, input[type=text] {
+      width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc;
+      border-radius: 8px; font-size: 15px;
+    }
+    textarea { min-height: 80px; }
+    .big-btn {
+      width: 100%; padding: 16px; font-size: 17px; border: none; border-radius: 10px;
+      margin-top: 12px; font-weight: bold;
+    }
+    .mic-btn { background: #7a2e2e; color: #fff; }
+    .mic-btn.recording { background: #c0392b; }
+    .save-btn { background: #2e6b3e; color: #fff; }
+    .secondary-btn { background: #ddd; color: #333; }
+    .card {
+      background: #fff; border-radius: 10px; padding: 14px; margin-top: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .missing { border: 2px solid #e0a800; }
+    .missing-tag { color: #b8860b; font-size: 12px; font-weight: bold; }
+    .ing-row, .step-row { display: flex; gap: 6px; margin-bottom: 6px; }
+    .ing-row input:first-child { flex: 1; }
+    .ing-row input:last-child { flex: 2; }
+    .step-row textarea { flex: 1; }
+    .small-btn { padding: 6px 10px; border: none; border-radius: 6px; background: #eee; font-size: 13px; }
+    .recipe-item { padding: 10px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+    .recipe-item b { font-size: 15px; }
+    .recipe-item .meta { font-size: 12px; color: #777; }
+    #status { font-size: 13px; color: #7a2e2e; margin-top: 8px; min-height: 18px; }
+    #photoPreview { max-width: 100%; border-radius: 8px; margin-top: 8px; }
+    .detail-close { float: right; }
+  </style>
+</head>
+<body>
+  <header><h1>Atima's Menu</h1></header>
+  <div id="setupWarning"></div>
+
+  <div class="tabs">
+    <button id="tabAdd" class="active" onclick="showView('add')">+ Add Recipe</button>
+    <button id="tabSearch" onclick="showView('search')">Search</button>
+  </div>
+
+  <!-- ADD VIEW -->
+  <div id="view-add" class="view active">
+    <label>Speaking in</label>
+    <select id="lang">
+      <option value="en-IN">English</option>
+      <option value="hi-IN">Hindi</option>
+    </select>
+    <div style="font-size:12px;color:#888;margin-top:4px;">
+      Hinglish is fine — speak naturally, pick whichever language you're saying most words in.
+    </div>
+
+    <button class="big-btn mic-btn" id="micBtn" onclick="toggleRecording()">🎤 Tap to speak</button>
+
+    <label>What you said (edit if needed)</label>
+    <textarea id="transcript" placeholder="e.g. Dal Makhani, whole black lentils soaked overnight, cooked with butter and cream, serves 4, takes about an hour..."></textarea>
+
+    <label>Photo of the dish (optional)</label>
+    <input type="file" id="photoInput" accept="image/*" capture="environment" onchange="previewPhoto()">
+    <img id="photoPreview" style="display:none;">
+
+    <button class="big-btn save-btn" onclick="submitTranscript()">Process Recipe</button>
+    <div id="status"></div>
+
+    <div id="reviewCard"></div>
+
+    <div id="batchQueue"></div>
+    <button class="big-btn save-btn" id="uploadAllBtn" style="display:none;" onclick="uploadBatch()">Upload All</button>
+  </div>
+
+  <!-- SEARCH VIEW -->
+  <div id="view-search" class="view">
+    <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="doSearch()">
+    <div id="searchResults"></div>
+    <div id="detailPanel"></div>
+  </div>
+
+  <script>
+    // ============================================================
+    // PASTE YOUR APPS SCRIPT WEB APP URL HERE (the one ending in /exec)
+    // ============================================================
+    var API_URL = 'https://script.google.com/macros/s/AKfycbxxwKQxi8JakH93pk78VivhxDPKak25WRJlGQ-EyurbMgEQnb4opoZhEAzhcfUZ7Yd4/exec';
+
+    if (!API_URL || API_URL.indexOf('PASTE_YOUR') === 0) {
+      var w = document.getElementById('setupWarning');
+      w.style.display = 'block';
+      w.textContent = 'Setup needed: open this file and replace API_URL near the top of the <script> section with your Apps Script Web App URL (ending in /exec).';
+    }
+
+    window.onerror = function(message, source, lineno) {
+      var w = document.getElementById('setupWarning');
+      w.style.display = 'block';
+      w.textContent = 'Script error: ' + message + ' (line ' + lineno + ')';
+      return false;
+    };
+
+    // ---- BACKEND CALL HELPER ----
+    // Uses text/plain content-type to avoid a CORS preflight request, which Apps Script
+    // web apps don't handle. The body itself is still valid JSON.
+    function callBackend(action, payload) {
+      return fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: action, payload: payload || {} })
+      })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (!data.ok) throw new Error(data.error || 'Unknown backend error');
+        return data.result;
+      });
+    }
+
+    var recognition = null;
+    var isRecording = false;
+    var currentParsed = null;
+    var currentPhotoData = null;
+    var currentMode = 'new';
+    var batchQueue = [];
+
+    function showView(name) {
+      document.getElementById('view-add').classList.toggle('active', name === 'add');
+      document.getElementById('view-search').classList.toggle('active', name === 'search');
+      document.getElementById('tabAdd').classList.toggle('active', name === 'add');
+      document.getElementById('tabSearch').classList.toggle('active', name === 'search');
+    }
+
+    // ---- VOICE ----
+    function toggleRecording() {
+      try {
+        var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          setStatus('Voice input is not supported in this browser — please type instead, or use Chrome.');
+          return;
+        }
+        if (isRecording) {
+          recognition.stop();
+          return;
+        }
+        recognition = new SpeechRecognition();
+        recognition.lang = document.getElementById('lang').value;
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        var finalText = document.getElementById('transcript').value;
+        recognition.onstart = function() {
+          isRecording = true;
+          document.getElementById('micBtn').textContent = '⏹ Tap to stop';
+          document.getElementById('micBtn').classList.add('recording');
+          setStatus('Listening...');
+        };
+        recognition.onresult = function(event) {
+          var interim = '';
+          for (var i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) finalText += event.results[i][0].transcript + ' ';
+            else interim += event.results[i][0].transcript;
+          }
+          document.getElementById('transcript').value = finalText + interim;
+        };
+        recognition.onerror = function(e) { setStatus('Voice error: ' + e.error); };
+        recognition.onend = function() {
+          isRecording = false;
+          document.getElementById('micBtn').textContent = '🎤 Tap to speak';
+          document.getElementById('micBtn').classList.remove('recording');
+          setStatus('');
+        };
+        recognition.start();
+      } catch (err) {
+        setStatus('Could not start voice recognition: ' + err.message);
+      }
+    }
+
+    function previewPhoto() {
+      var file = document.getElementById('photoInput').files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var img = document.getElementById('photoPreview');
+        img.src = e.target.result;
+        img.style.display = 'block';
+        currentPhotoData = {
+          base64: e.target.result.split(',')[1],
+          mimeType: file.type,
+          fileName: file.name
+        };
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // ---- SUBMIT / AI PARSE ----
+    function submitTranscript() {
+      var transcript = document.getElementById('transcript').value.trim();
+      if (!transcript) { setStatus('Please speak or type a description first.'); return; }
+      setStatus('Understanding your recipe...');
+      callBackend('parseRecipeWithAI', { transcript: transcript, language: document.getElementById('lang').value })
+        .then(onParsed)
+        .catch(function(err) { setStatus('Error: ' + err.message); });
+    }
+
+    function onParsed(recipe) {
+      currentParsed = recipe;
+      currentMode = 'new';
+      setStatus('');
+      renderReviewForm(recipe);
+    }
+
+    function renderReviewForm(r) {
+      var missing = r.missingFields || [];
+      var actionLabel = currentMode === 'edit' ? 'Update Recipe' : 'Add to Batch';
+      var actionFn = currentMode === 'edit' ? 'confirmSave()' : 'addToBatch()';
+
+      var ingRows = (r.ingredients || []).map(function(ing) {
+        return '<div class="ing-row">' +
+          '<input type="text" value="' + esc(ing.qty || '') + '" placeholder="Qty">' +
+          '<input type="text" value="' + esc(ing.name || '') + '" placeholder="Ingredient">' +
+          '</div>';
+      }).join('');
+
+      var stepRows = (r.steps || []).map(function(s) {
+        return '<div class="step-row"><textarea>' + esc(s) + '</textarea></div>';
+      }).join('');
+
+      var html =
+        '<div class="card ' + (missing.length ? 'missing' : '') + '">' +
+        (missing.length ? '<div class="missing-tag">Missing: ' + missing.join(', ') + ' — please fill in below</div>' : '') +
+        '<label>Recipe name</label><input type="text" id="f_name" value="' + esc(r.name || '') + '">' +
+        '<label>Version (optional)</label><input type="text" id="f_version" value="' + esc(r.version || '') + '">' +
+        '<label>Category</label><input type="text" id="f_category" value="' + esc(r.category || '') + '">' +
+        '<label>Veg / Non-veg</label><select id="f_veg">' +
+          '<option ' + (r.veg === 'Veg' ? 'selected' : '') + '>Veg</option>' +
+          '<option ' + (r.veg === 'Non-veg' ? 'selected' : '') + '>Non-veg</option></select>' +
+        '<label>Servings</label><input type="text" id="f_servings" value="' + esc(r.servings || '') + '">' +
+        '<label>Prep time (min)</label><input type="text" id="f_prep" value="' + esc(r.prepTimeMin || '') + '">' +
+        '<label>Cook time (min)</label><input type="text" id="f_cook" value="' + esc(r.cookTimeMin || '') + '">' +
+        '<label>Ingredients</label><div id="ingList">' + ingRows + '</div>' +
+        '<button class="small-btn" onclick="addIngRow()">+ Add ingredient</button>' +
+        '<label>Method / Steps</label><div id="stepList">' + stepRows + '</div>' +
+        '<button class="small-btn" onclick="addStepRow()">+ Add step</button>' +
+        '<label>Notes (optional)</label><textarea id="f_notes">' + esc(r.notes || '') + '</textarea>' +
+        '<button class="big-btn save-btn" onclick="' + actionFn + '">' + actionLabel + '</button>' +
+        (currentMode === 'edit' ? '<button class="big-btn secondary-btn" onclick="cancelEdit()">Cancel Edit</button>' : '') +
+        '</div>';
+
+      document.getElementById('reviewCard').innerHTML = html;
+    }
+
+    function cancelEdit() {
+      currentMode = 'new';
+      currentParsed = null;
+      document.getElementById('reviewCard').innerHTML = '';
+      document.getElementById('detailPanel').innerHTML = '';
+    }
+
+    function addIngRow() {
+      document.getElementById('ingList').insertAdjacentHTML('beforeend',
+        '<div class="ing-row"><input type="text" placeholder="Qty"><input type="text" placeholder="Ingredient"></div>');
+    }
+    function addStepRow() {
+      document.getElementById('stepList').insertAdjacentHTML('beforeend',
+        '<div class="step-row"><textarea placeholder="Next step"></textarea></div>');
+    }
+
+    function buildRecipeFromForm() {
+      var ingredients = [];
+      document.querySelectorAll('#ingList .ing-row').forEach(function(row) {
+        var inputs = row.querySelectorAll('input');
+        var qty = inputs[0].value.trim(), name = inputs[1].value.trim();
+        if (name) ingredients.push({ qty: qty, name: name });
+      });
+      var steps = [];
+      document.querySelectorAll('#stepList .step-row textarea').forEach(function(t) {
+        if (t.value.trim()) steps.push(t.value.trim());
+      });
+
+      return {
+        id: currentParsed && currentParsed.id,
+        name: document.getElementById('f_name').value.trim(),
+        version: document.getElementById('f_version').value.trim(),
+        category: document.getElementById('f_category').value.trim() || 'Uncategorised',
+        veg: document.getElementById('f_veg').value,
+        servings: document.getElementById('f_servings').value.trim(),
+        prepTimeMin: document.getElementById('f_prep').value.trim(),
+        cookTimeMin: document.getElementById('f_cook').value.trim(),
+        ingredients: ingredients,
+        steps: steps,
+        notes: document.getElementById('f_notes').value.trim(),
+        existingPhotoUrl: currentParsed && currentParsed.photoUrl
+      };
+    }
+
+    // ---- EDIT (existing recipe — syncs immediately) ----
+    function confirmSave() {
+      var recipe = buildRecipeFromForm();
+      if (!recipe.name) { setStatus('Recipe needs a name.'); return; }
+
+      setStatus('Saving...');
+      callBackend('saveRecipe', { recipe: recipe, photoData: currentPhotoData })
+        .then(function() {
+          setStatus("Updated in Atima's Menu Book!");
+          document.getElementById('reviewCard').innerHTML = '';
+          currentMode = 'new';
+          currentParsed = null;
+        })
+        .catch(function(err) { setStatus('Error saving: ' + err.message); });
+    }
+
+    // ---- NEW RECIPE — add to local batch ----
+    function addToBatch() {
+      var recipe = buildRecipeFromForm();
+      if (!recipe.name) { setStatus('Recipe needs a name.'); return; }
+
+      batchQueue.push({ recipe: recipe, photoData: currentPhotoData, displayName: recipe.name });
+      renderBatchQueue();
+
+      document.getElementById('reviewCard').innerHTML = '';
+      document.getElementById('transcript').value = '';
+      document.getElementById('photoPreview').style.display = 'none';
+      document.getElementById('photoInput').value = '';
+      currentPhotoData = null;
+      currentParsed = null;
+      setStatus('Added "' + recipe.name + '" — record the next one, or tap Upload All when done.');
+    }
+
+    function renderBatchQueue() {
+      var box = document.getElementById('batchQueue');
+      var uploadBtn = document.getElementById('uploadAllBtn');
+      if (!batchQueue.length) {
+        box.innerHTML = '';
+        uploadBtn.style.display = 'none';
+        return;
+      }
+      var html = '<div class="card"><b>Waiting to upload (' + batchQueue.length + ')</b>';
+      batchQueue.forEach(function(item, i) {
+        html += '<div class="recipe-item">' + esc(item.displayName) +
+          ' <button class="small-btn" onclick="removeFromBatch(' + i + ')">Remove</button></div>';
+      });
+      html += '</div>';
+      box.innerHTML = html;
+      uploadBtn.style.display = 'block';
+      uploadBtn.textContent = 'Upload All (' + batchQueue.length + ')';
+    }
+
+    function removeFromBatch(i) {
+      batchQueue.splice(i, 1);
+      renderBatchQueue();
+    }
+
+    function uploadBatch() {
+      if (!batchQueue.length) return;
+      setStatus('Uploading ' + batchQueue.length + ' recipe(s)...');
+      var payload = batchQueue.map(function(item) {
+        return { recipe: item.recipe, photoData: item.photoData };
+      });
+      callBackend('saveRecipesBatch', { items: payload })
+        .then(function() {
+          setStatus('Uploaded ' + batchQueue.length + " recipe(s) to Atima's Menu Book!");
+          batchQueue = [];
+          renderBatchQueue();
+        })
+        .catch(function(err) { setStatus('Error uploading: ' + err.message); });
+    }
+
+    // ---- SEARCH ----
+    var searchTimer = null;
+    function doSearch() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function() {
+        var q = document.getElementById('searchBox').value;
+        callBackend('searchRecipes', { query: q }).then(renderResults).catch(function(err) {
+          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Error: ' + esc(err.message) + '</p>';
+        });
+      }, 250);
+    }
+
+    function renderResults(results) {
+      var html = results.map(function(r) {
+        return '<div class="recipe-item">' +
+          '<div onclick="showDetail(\'' + r.id + '\')" style="flex:1;cursor:pointer;">' +
+          '<b>' + esc(r.name) + (r.version ? ' — ' + esc(r.version) : '') + '</b><br>' +
+          '<span class="meta">' + esc(r.category) + ' · ' + esc(r.veg) + '</span></div>' +
+          '<button class="small-btn" onclick="editRecipe(\'' + r.id + '\')">Edit</button>' +
+          '</div>';
+      }).join('');
+      document.getElementById('searchResults').innerHTML = html || '<p style="color:#888;">No recipes found.</p>';
+    }
+
+    function showDetail(id) {
+      callBackend('getRecipeById', { id: id }).then(renderDetail);
+    }
+
+    function renderDetail(r) {
+      if (!r) return;
+      var ingHtml = (r.ingredients || []).map(function(i) {
+        return '<li>' + (i.qty ? esc(i.qty) + ' — ' : '') + esc(i.name) + '</li>';
+      }).join('');
+      var stepHtml = (r.steps || []).map(function(s) { return '<li>' + esc(s) + '</li>'; }).join('');
+      var html = '<div class="card">' +
+        '<button class="small-btn detail-close" onclick="document.getElementById(\'detailPanel\').innerHTML=\'\'">Close</button>' +
+        '<h3>' + esc(r.name) + (r.version ? ' — ' + esc(r.version) : '') + '</h3>' +
+        '<div class="meta">' + esc(r.category) + ' · ' + esc(r.veg) +
+          (r.servings ? ' · Serves ' + esc(r.servings) : '') + '</div>' +
+        (r.photoUrl ? '<img src="' + r.photoUrl + '" style="max-width:100%;border-radius:8px;margin-top:8px;">' : '') +
+        '<p><b>Ingredients</b></p><ul>' + ingHtml + '</ul>' +
+        '<p><b>Method</b></p><ol>' + stepHtml + '</ol>' +
+        (r.notes ? '<p><i>' + esc(r.notes) + '</i></p>' : '') +
+        '<button class="big-btn secondary-btn" onclick="editRecipe(\'' + r.id + '\')">Edit this recipe</button>' +
+        '</div>';
+      document.getElementById('detailPanel').innerHTML = html;
+    }
+
+    function editRecipe(id) {
+      callBackend('getRecipeById', { id: id }).then(function(r) {
+        if (!r) return;
+        currentMode = 'edit';
+        currentParsed = r;
+        currentPhotoData = null;
+        showView('add');
+        document.getElementById('transcript').value = '';
+        document.getElementById('reviewCard').innerHTML = '';
+        document.getElementById('detailPanel').innerHTML = '';
+        r.missingFields = [];
+        renderReviewForm(r);
+        if (r.photoUrl) {
+          var img = document.getElementById('photoPreview');
+          img.src = r.photoUrl;
+          img.style.display = 'block';
+        }
+      });
+    }
+
+    function setStatus(msg) { document.getElementById('status').textContent = msg; }
+    function esc(s) {
+      return (s == null ? '' : String(s)).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+  </script>
+</body>
+</html>
