@@ -77,7 +77,7 @@
     <textarea id="transcript" placeholder="e.g. Dal Makhani, whole black lentils soaked overnight, cooked with butter and cream, serves 4, takes about an hour..."></textarea>
 
     <label>Photo of the dish (optional)</label>
-    <input type="file" id="photoInput" accept="image/*" capture="environment" onchange="previewPhoto()">
+    <input type="file" id="photoInput" accept="image/*" onchange="previewPhoto()">
     <img id="photoPreview" style="display:none;">
 
     <button class="big-btn save-btn" onclick="submitTranscript()">Process Recipe</button>
@@ -91,7 +91,11 @@
 
   <!-- SEARCH VIEW -->
   <div id="view-search" class="view">
-    <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="doSearch()">
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="doSearch()" style="flex:1;">
+      <button id="searchMicBtn" class="mic-btn" style="width:52px; border:none; border-radius:8px; font-size:18px;" onclick="toggleSearchRecording()">🎤</button>
+    </div>
+    <div id="searchStatus" style="font-size:13px; color:#7a2e2e; margin-top:6px; min-height:16px;"></div>
     <div id="searchResults"></div>
     <div id="detailPanel"></div>
   </div>
@@ -138,11 +142,17 @@
     var currentMode = 'new';
     var batchQueue = [];
 
+    var searchRecognition = null;
+    var isSearchRecording = false;
+
     function showView(name) {
       document.getElementById('view-add').classList.toggle('active', name === 'add');
       document.getElementById('view-search').classList.toggle('active', name === 'search');
       document.getElementById('tabAdd').classList.toggle('active', name === 'add');
       document.getElementById('tabSearch').classList.toggle('active', name === 'search');
+      if (name === 'search') {
+        doSearch(); // reload every time — picks up anything just added, and shows everything if the box is empty
+      }
     }
 
     // ---- VOICE ----
@@ -187,6 +197,47 @@
         recognition.start();
       } catch (err) {
         setStatus('Could not start voice recognition: ' + err.message);
+      }
+    }
+
+    // ---- VOICE SEARCH (separate mic instance from the Add Recipe one) ----
+    function toggleSearchRecording() {
+      try {
+        var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          document.getElementById('searchStatus').textContent = 'Voice input is not supported in this browser.';
+          return;
+        }
+        if (isSearchRecording) {
+          searchRecognition.stop();
+          return;
+        }
+        searchRecognition = new SpeechRecognition();
+        searchRecognition.lang = 'en-IN'; // search terms are usually short dish/category names; English works well for both
+        searchRecognition.continuous = false;
+        searchRecognition.interimResults = false;
+
+        searchRecognition.onstart = function() {
+          isSearchRecording = true;
+          document.getElementById('searchMicBtn').textContent = '⏹';
+          document.getElementById('searchStatus').textContent = 'Listening...';
+        };
+        searchRecognition.onresult = function(event) {
+          var text = event.results[0][0].transcript;
+          document.getElementById('searchBox').value = text;
+          doSearch();
+        };
+        searchRecognition.onerror = function(e) {
+          document.getElementById('searchStatus').textContent = 'Voice error: ' + e.error;
+        };
+        searchRecognition.onend = function() {
+          isSearchRecording = false;
+          document.getElementById('searchMicBtn').textContent = '🎤';
+          document.getElementById('searchStatus').textContent = '';
+        };
+        searchRecognition.start();
+      } catch (err) {
+        document.getElementById('searchStatus').textContent = 'Could not start voice search: ' + err.message;
       }
     }
 
@@ -382,13 +433,21 @@
 
     // ---- SEARCH ----
     var searchTimer = null;
+    var searchRequestId = 0; // guards against slow/out-of-order responses overwriting newer results
     function doSearch() {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(function() {
         var q = document.getElementById('searchBox').value;
-        callBackend('searchRecipes', { query: q }).then(renderResults).catch(function(err) {
-          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Error: ' + esc(err.message) + '</p>';
-        });
+        var thisRequestId = ++searchRequestId;
+        callBackend('searchRecipes', { query: q })
+          .then(function(results) {
+            if (thisRequestId !== searchRequestId) return; // a newer search already started, ignore this stale reply
+            renderResults(results);
+          })
+          .catch(function(err) {
+            if (thisRequestId !== searchRequestId) return;
+            document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Error: ' + esc(err.message) + '</p>';
+          });
       }, 250);
     }
 
