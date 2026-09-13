@@ -202,44 +202,55 @@
       }
     }
 
-    // ---- SEARCH DATA: fetched once per visit to the app, then filtered locally for
-    // instant typing/voice search. Adds/edits/deletes update this cache directly, so
-    // there's normally no need to re-fetch from the network at all after the first load.
+    // ---- SEARCH DATA: cached locally so typing/voice search filters instantly with no
+    // network round-trip. Adds/edits/deletes made THROUGH the app update this cache
+    // directly. Changes made OUTSIDE the app (editing the Sheet by hand) can't be known
+    // about immediately, so the cache also auto-expires after 15 minutes and quietly
+    // re-fetches in the background — no manual refresh needed for that to catch up.
     var allRecipesCache = [];
     var CACHE_KEY = 'atimasMenuRecipeListCache';
-    var hasLoadedThisSession = false;
+    var CACHE_MAX_AGE_MS = 15 * 60 * 1000; // 15 minutes
     var isLoadingList = false;
 
-    function loadAllRecipes(forceRefresh) {
-      // Already loaded this session and not an explicit refresh? Nothing to do — instant.
-      if (hasLoadedThisSession && !forceRefresh) {
-        applyLocalSearch();
-        return;
-      }
-      // A load is already in progress — don't start a second overlapping one.
-      if (isLoadingList) return;
+    function saveCacheToStorage() {
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ data: allRecipesCache, savedAt: Date.now() }));
+      } catch (e) { /* storage full or unavailable — not critical */ }
+    }
 
+    function loadAllRecipes() {
       var cached = null;
       try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { /* ignore */ }
-      if (cached && cached.length && !forceRefresh) {
-        allRecipesCache = cached;
-        hasLoadedThisSession = true;
+      var cacheIsFresh = cached && cached.data && cached.data.length && (Date.now() - cached.savedAt) < CACHE_MAX_AGE_MS;
+
+      if (cacheIsFresh) {
+        allRecipesCache = cached.data;
         applyLocalSearch();
-        return; // trust the saved copy from last time — no network call needed
+        return; // recently fetched — trust it, no network call needed
       }
 
+      // Show whatever we have (even if stale) instantly, while fetching the current
+      // version in the background — so it never feels like nothing is happening.
+      if (cached && cached.data && cached.data.length) {
+        allRecipesCache = cached.data;
+        applyLocalSearch();
+      }
+
+      if (isLoadingList) return; // a fetch is already in flight — don't start a second one
       isLoadingList = true;
       document.getElementById('loadingBanner').style.display = 'block';
 
       callBackend('listRecipesLight', {})
         .then(function(results) {
           allRecipesCache = results; // already sorted alphabetically by the backend
-          hasLoadedThisSession = true;
-          try { localStorage.setItem(CACHE_KEY, JSON.stringify(results)); } catch (e) { /* storage full or unavailable — not critical */ }
+          saveCacheToStorage();
           applyLocalSearch();
         })
         .catch(function(err) {
-          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+          if (!cached || !cached.data || !cached.data.length) {
+            document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+          }
+          // otherwise: keep quietly showing the stale copy rather than replacing it with an error
         })
         .finally(function() {
           isLoadingList = false;
@@ -490,7 +501,7 @@
       if (idx !== -1) allRecipesCache[idx] = lightEntry;
       else allRecipesCache.push(lightEntry);
       allRecipesCache.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify(allRecipesCache)); } catch (e) { /* ignore */ }
+      saveCacheToStorage();
     }
 
     // ---- NEW RECIPE — add to local batch ----
@@ -609,7 +620,7 @@
         .then(function() {
           document.getElementById('detailPanel').innerHTML = '';
           allRecipesCache = allRecipesCache.filter(function(r) { return r.id !== id; });
-          try { localStorage.setItem(CACHE_KEY, JSON.stringify(allRecipesCache)); } catch (e) { /* ignore */ }
+          saveCacheToStorage();
           applyLocalSearch();
         })
         .catch(function(err) { alert('Could not delete: ' + err.message); });
