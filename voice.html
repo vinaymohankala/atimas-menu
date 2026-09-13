@@ -94,7 +94,6 @@
     <div style="display:flex; gap:8px;">
       <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="applyLocalSearch()" style="flex:1;">
       <button id="searchMicBtn" class="mic-btn" style="width:52px; border:none; border-radius:8px; font-size:18px;" onclick="toggleSearchRecording()">🎤</button>
-      <button id="refreshBtn" title="Refresh list" style="width:52px; border:none; border-radius:8px; font-size:18px; background:#eee;" onclick="loadAllRecipes(true)">🔄</button>
     </div>
     <div id="searchStatus" style="font-size:13px; color:#7a2e2e; margin-top:6px; min-height:16px;"></div>
     <div id="loadingBanner" style="display:none; background:#fff3cd; color:#664d03; padding:10px; border-radius:8px; margin-top:10px; font-weight:bold; text-align:center;">
@@ -138,7 +137,16 @@
     // Apps Script occasionally returns a plain HTML error page instead of JSON right after
     // a fresh deployment (a transient hiccup) — detect that and retry once automatically
     // before giving up, instead of showing a confusing parse error.
-    function callBackend(action, payload, isRetry) {
+    // Actions that only READ data are safe to retry automatically if the response looks
+    // garbled — retrying them again can't cause harm. Actions that WRITE data (save,
+    // delete) must never auto-retry: if the write actually succeeded server-side but the
+    // reply back was garbled, retrying would silently duplicate or re-apply the change.
+    var SAFE_TO_RETRY_ACTIONS = ['listRecipesLight', 'getRecipeById', 'searchRecipes', 'parseRecipeWithAI'];
+
+    function callBackend(action, payload, retryCount) {
+      retryCount = retryCount || 0;
+      var maxRetries = SAFE_TO_RETRY_ACTIONS.indexOf(action) !== -1 ? 3 : 0;
+
       return fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -160,12 +168,15 @@
         return data.result;
       })
       .catch(function(err) {
-        if (err.message === 'NOT_JSON' && !isRetry) {
-          return new Promise(function(resolve) { setTimeout(resolve, 800); })
-            .then(function() { return callBackend(action, payload, true); });
+        if (err.message === 'NOT_JSON' && retryCount < maxRetries) {
+          var delay = 1000 * (retryCount + 1); // 1s, then 2s, then 3s
+          return new Promise(function(resolve) { setTimeout(resolve, delay); })
+            .then(function() { return callBackend(action, payload, retryCount + 1); });
         }
         if (err.message === 'NOT_JSON') {
-          throw new Error('The server sent back an unexpected response. Please wait a few seconds and try again.');
+          throw new Error(maxRetries > 0
+            ? 'The app is busy right now (this can happen when using it from two devices at once) — please wait a few seconds and try again.'
+            : 'This action may or may not have gone through — please check the recipe list before trying again, rather than retrying immediately, to avoid creating a duplicate.');
         }
         throw err;
       });
@@ -219,7 +230,6 @@
 
       isLoadingList = true;
       document.getElementById('loadingBanner').style.display = 'block';
-      document.getElementById('refreshBtn').disabled = true;
 
       callBackend('listRecipesLight', {})
         .then(function(results) {
@@ -234,7 +244,6 @@
         .finally(function() {
           isLoadingList = false;
           document.getElementById('loadingBanner').style.display = 'none';
-          document.getElementById('refreshBtn').disabled = false;
         });
     }
 
