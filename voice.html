@@ -122,16 +122,39 @@
     // ---- BACKEND CALL HELPER ----
     // Uses text/plain content-type to avoid a CORS preflight request, which Apps Script
     // web apps don't handle. The body itself is still valid JSON.
-    function callBackend(action, payload) {
+    // Apps Script occasionally returns a plain HTML error page instead of JSON right after
+    // a fresh deployment (a transient hiccup) — detect that and retry once automatically
+    // before giving up, instead of showing a confusing parse error.
+    function callBackend(action, payload, isRetry) {
       return fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action: action, payload: payload || {} })
       })
-      .then(function(res) { return res.json(); })
+      .then(function(res) {
+        return res.text().then(function(text) {
+          var data;
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            throw new Error('NOT_JSON');
+          }
+          return data;
+        });
+      })
       .then(function(data) {
         if (!data.ok) throw new Error(data.error || 'Unknown backend error');
         return data.result;
+      })
+      .catch(function(err) {
+        if (err.message === 'NOT_JSON' && !isRetry) {
+          return new Promise(function(resolve) { setTimeout(resolve, 800); })
+            .then(function() { return callBackend(action, payload, true); });
+        }
+        if (err.message === 'NOT_JSON') {
+          throw new Error('The server sent back an unexpected response. Please wait a few seconds and try again.');
+        }
+        throw err;
       });
     }
 
@@ -157,16 +180,31 @@
 
     // ---- SEARCH DATA: fetched once, then filtered locally for instant typing/voice search ----
     var allRecipesCache = [];
+    var CACHE_KEY = 'atimasMenuRecipeListCache';
 
     function loadAllRecipes() {
-      document.getElementById('searchResults').innerHTML = '<p style="color:#888;">Loading recipes...</p>';
-      callBackend('searchRecipes', { query: '' })
+      // Show a cached copy instantly (from last time), while quietly fetching the latest in the background.
+      var cached = null;
+      try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { /* ignore */ }
+
+      if (cached && cached.length) {
+        allRecipesCache = cached;
+        applyLocalSearch();
+      } else {
+        document.getElementById('searchResults').innerHTML = '<p style="color:#888;">Loading recipes...</p>';
+      }
+
+      callBackend('listRecipesLight', {})
         .then(function(results) {
           allRecipesCache = results; // already sorted alphabetically by the backend
+          try { localStorage.setItem(CACHE_KEY, JSON.stringify(results)); } catch (e) { /* storage full or unavailable — not critical */ }
           applyLocalSearch();
         })
         .catch(function(err) {
-          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+          if (!cached || !cached.length) {
+            document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+          }
+          // if we already showed cached results, silently keep them rather than replacing with an error
         });
     }
 
@@ -338,6 +376,7 @@
         '<label>Notes (optional)</label><textarea id="f_notes">' + esc(r.notes || '') + '</textarea>' +
         '<button class="big-btn save-btn" onclick="' + actionFn + '">' + actionLabel + '</button>' +
         (currentMode === 'edit' ? '<button class="big-btn secondary-btn" onclick="cancelEdit()">Cancel Edit</button>' : '') +
+        (currentMode === 'edit' ? '<button class="big-btn" style="background:#c0392b;color:#fff;" onclick="deleteRecipeConfirm(\'' + r.id + '\', \'' + esc(r.name) + '\'); cancelEdit();">Delete this recipe</button>' : '') +
         '</div>';
 
       document.getElementById('reviewCard').innerHTML = html;
@@ -494,8 +533,21 @@
         '<p><b>Method</b></p><ol>' + stepHtml + '</ol>' +
         (r.notes ? '<p><i>' + esc(r.notes) + '</i></p>' : '') +
         '<button class="big-btn secondary-btn" onclick="editRecipe(\'' + r.id + '\')">Edit this recipe</button>' +
+        '<button class="big-btn" style="background:#c0392b;color:#fff;" onclick="deleteRecipeConfirm(\'' + r.id + '\', \'' + esc(r.name) + '\')">Delete this recipe</button>' +
         '</div>';
       document.getElementById('detailPanel').innerHTML = html;
+    }
+
+    function deleteRecipeConfirm(id, name) {
+      if (!confirm('Delete "' + name + '" permanently? This cannot be undone.')) return;
+      callBackend('deleteRecipe', { id: id })
+        .then(function() {
+          document.getElementById('detailPanel').innerHTML = '';
+          allRecipesCache = allRecipesCache.filter(function(r) { return r.id !== id; });
+          try { localStorage.setItem(CACHE_KEY, JSON.stringify(allRecipesCache)); } catch (e) { /* ignore */ }
+          applyLocalSearch();
+        })
+        .catch(function(err) { alert('Could not delete: ' + err.message); });
     }
 
     function editRecipe(id) {
