@@ -92,7 +92,7 @@
   <!-- SEARCH VIEW -->
   <div id="view-search" class="view">
     <div style="display:flex; gap:8px;">
-      <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="doSearch()" style="flex:1;">
+      <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="applyLocalSearch()" style="flex:1;">
       <button id="searchMicBtn" class="mic-btn" style="width:52px; border:none; border-radius:8px; font-size:18px;" onclick="toggleSearchRecording()">🎤</button>
     </div>
     <div id="searchStatus" style="font-size:13px; color:#7a2e2e; margin-top:6px; min-height:16px;"></div>
@@ -151,11 +151,39 @@
       document.getElementById('tabAdd').classList.toggle('active', name === 'add');
       document.getElementById('tabSearch').classList.toggle('active', name === 'search');
       if (name === 'search') {
-        doSearch(); // reload every time — picks up anything just added, and shows everything if the box is empty
+        loadAllRecipes(); // fetch once from Drive; typing then filters instantly with no further network calls
       }
     }
 
-    // ---- VOICE ----
+    // ---- SEARCH DATA: fetched once, then filtered locally for instant typing/voice search ----
+    var allRecipesCache = [];
+
+    function loadAllRecipes() {
+      document.getElementById('searchResults').innerHTML = '<p style="color:#888;">Loading recipes...</p>';
+      callBackend('searchRecipes', { query: '' })
+        .then(function(results) {
+          allRecipesCache = results; // already sorted alphabetically by the backend
+          applyLocalSearch();
+        })
+        .catch(function(err) {
+          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+        });
+    }
+
+    // Filters the already-loaded list in memory — instant, no network round-trip.
+    function applyLocalSearch() {
+      var q = document.getElementById('searchBox').value.toLowerCase().trim();
+      if (!q) {
+        renderResults(allRecipesCache);
+        return;
+      }
+      var filtered = allRecipesCache.filter(function(r) {
+        return (r.name || '').toLowerCase().indexOf(q) !== -1 ||
+               (r.category || '').toLowerCase().indexOf(q) !== -1;
+      });
+      renderResults(filtered);
+    }
+
     function toggleRecording() {
       try {
         var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -225,7 +253,7 @@
         searchRecognition.onresult = function(event) {
           var text = event.results[0][0].transcript;
           document.getElementById('searchBox').value = text;
-          doSearch();
+          applyLocalSearch();
         };
         searchRecognition.onerror = function(e) {
           document.getElementById('searchStatus').textContent = 'Voice error: ' + e.error;
@@ -432,24 +460,7 @@
     }
 
     // ---- SEARCH ----
-    var searchTimer = null;
-    var searchRequestId = 0; // guards against slow/out-of-order responses overwriting newer results
-    function doSearch() {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(function() {
-        var q = document.getElementById('searchBox').value;
-        var thisRequestId = ++searchRequestId;
-        callBackend('searchRecipes', { query: q })
-          .then(function(results) {
-            if (thisRequestId !== searchRequestId) return; // a newer search already started, ignore this stale reply
-            renderResults(results);
-          })
-          .catch(function(err) {
-            if (thisRequestId !== searchRequestId) return;
-            document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Error: ' + esc(err.message) + '</p>';
-          });
-      }, 250);
-    }
+    // (filtering itself now happens in applyLocalSearch() above — no network call per keystroke)
 
     function renderResults(results) {
       var html = results.map(function(r) {
