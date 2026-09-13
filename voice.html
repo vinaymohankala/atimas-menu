@@ -119,6 +119,15 @@
       return false;
     };
 
+    // Catches errors from any promise (async call) that wasn't explicitly handled with
+    // its own .catch() — without this, such failures happen completely silently, which
+    // looks like a button "doing nothing" when tapped.
+    window.onunhandledrejection = function(event) {
+      var w = document.getElementById('setupWarning');
+      w.style.display = 'block';
+      w.textContent = 'Unexpected error: ' + (event.reason && event.reason.message ? event.reason.message : event.reason);
+    };
+
     // ---- BACKEND CALL HELPER ----
     // Uses text/plain content-type to avoid a CORS preflight request, which Apps Script
     // web apps don't handle. The body itself is still valid JSON.
@@ -514,7 +523,12 @@
     }
 
     function showDetail(id) {
-      callBackend('getRecipeById', { id: id }).then(renderDetail);
+      document.getElementById('detailPanel').innerHTML = '<p style="color:#888;">Loading...</p>';
+      callBackend('getRecipeById', { id: id })
+        .then(renderDetail)
+        .catch(function(err) {
+          document.getElementById('detailPanel').innerHTML = '<p style="color:#c00;">Could not open recipe: ' + esc(err.message) + '</p>';
+        });
     }
 
     function renderDetail(r) {
@@ -567,6 +581,8 @@
           img.src = r.photoUrl;
           img.style.display = 'block';
         }
+      }).catch(function(err) {
+        alert('Could not open this recipe for editing: ' + err.message);
       });
     }
 
