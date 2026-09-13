@@ -100,8 +100,8 @@
     <div id="loadingBanner" style="display:none; background:#fff3cd; color:#664d03; padding:10px; border-radius:8px; margin-top:10px; font-weight:bold; text-align:center;">
       ⏳ Loading recipes — this can take a few seconds the first time...
     </div>
-    <div id="searchResults"></div>
     <div id="detailPanel"></div>
+    <div id="searchResults"></div>
   </div>
 
   <script>
@@ -563,11 +563,13 @@
     }
 
     function showDetail(id) {
-      document.getElementById('detailPanel').innerHTML = '<p style="color:#888;">Loading...</p>';
+      var panel = document.getElementById('detailPanel');
+      panel.innerHTML = '<div class="card" style="border:2px solid #7a2e2e;"><b>Opening recipe...</b></div>';
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       callBackend('getRecipeById', { id: id })
         .then(renderDetail)
         .catch(function(err) {
-          document.getElementById('detailPanel').innerHTML = '<p style="color:#c00;">Could not open recipe: ' + esc(err.message) + '</p>';
+          panel.innerHTML = '<p style="color:#c00;">Could not open recipe: ' + esc(err.message) + '</p>';
         });
     }
 
