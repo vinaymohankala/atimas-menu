@@ -94,8 +94,12 @@
     <div style="display:flex; gap:8px;">
       <input type="text" id="searchBox" placeholder="Search by name or category..." oninput="applyLocalSearch()" style="flex:1;">
       <button id="searchMicBtn" class="mic-btn" style="width:52px; border:none; border-radius:8px; font-size:18px;" onclick="toggleSearchRecording()">🎤</button>
+      <button id="refreshBtn" title="Refresh list" style="width:52px; border:none; border-radius:8px; font-size:18px; background:#eee;" onclick="loadAllRecipes(true)">🔄</button>
     </div>
     <div id="searchStatus" style="font-size:13px; color:#7a2e2e; margin-top:6px; min-height:16px;"></div>
+    <div id="loadingBanner" style="display:none; background:#fff3cd; color:#664d03; padding:10px; border-radius:8px; margin-top:10px; font-weight:bold; text-align:center;">
+      ⏳ Loading recipes — this can take a few seconds the first time...
+    </div>
     <div id="searchResults"></div>
     <div id="detailPanel"></div>
   </div>
@@ -183,37 +187,54 @@
       document.getElementById('tabAdd').classList.toggle('active', name === 'add');
       document.getElementById('tabSearch').classList.toggle('active', name === 'search');
       if (name === 'search') {
-        loadAllRecipes(); // fetch once from Drive; typing then filters instantly with no further network calls
+        loadAllRecipes(); // only actually hits the network the first time — see below
       }
     }
 
-    // ---- SEARCH DATA: fetched once, then filtered locally for instant typing/voice search ----
+    // ---- SEARCH DATA: fetched once per visit to the app, then filtered locally for
+    // instant typing/voice search. Adds/edits/deletes update this cache directly, so
+    // there's normally no need to re-fetch from the network at all after the first load.
     var allRecipesCache = [];
     var CACHE_KEY = 'atimasMenuRecipeListCache';
+    var hasLoadedThisSession = false;
+    var isLoadingList = false;
 
-    function loadAllRecipes() {
-      // Show a cached copy instantly (from last time), while quietly fetching the latest in the background.
+    function loadAllRecipes(forceRefresh) {
+      // Already loaded this session and not an explicit refresh? Nothing to do — instant.
+      if (hasLoadedThisSession && !forceRefresh) {
+        applyLocalSearch();
+        return;
+      }
+      // A load is already in progress — don't start a second overlapping one.
+      if (isLoadingList) return;
+
       var cached = null;
       try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { /* ignore */ }
-
-      if (cached && cached.length) {
+      if (cached && cached.length && !forceRefresh) {
         allRecipesCache = cached;
+        hasLoadedThisSession = true;
         applyLocalSearch();
-      } else {
-        document.getElementById('searchResults').innerHTML = '<p style="color:#888;">Loading recipes...</p>';
+        return; // trust the saved copy from last time — no network call needed
       }
+
+      isLoadingList = true;
+      document.getElementById('loadingBanner').style.display = 'block';
+      document.getElementById('refreshBtn').disabled = true;
 
       callBackend('listRecipesLight', {})
         .then(function(results) {
           allRecipesCache = results; // already sorted alphabetically by the backend
+          hasLoadedThisSession = true;
           try { localStorage.setItem(CACHE_KEY, JSON.stringify(results)); } catch (e) { /* storage full or unavailable — not critical */ }
           applyLocalSearch();
         })
         .catch(function(err) {
-          if (!cached || !cached.length) {
-            document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
-          }
-          // if we already showed cached results, silently keep them rather than replacing with an error
+          document.getElementById('searchResults').innerHTML = '<p style="color:#c00;">Could not load recipes: ' + esc(err.message) + '</p>';
+        })
+        .finally(function() {
+          isLoadingList = false;
+          document.getElementById('loadingBanner').style.display = 'none';
+          document.getElementById('refreshBtn').disabled = false;
         });
     }
 
@@ -447,8 +468,20 @@
           document.getElementById('reviewCard').innerHTML = '';
           currentMode = 'new';
           currentParsed = null;
+          updateCacheEntry(recipe); // keep the search list accurate without a network re-fetch
         })
         .catch(function(err) { setStatus('Error saving: ' + err.message); });
+    }
+
+    // Adds or updates one entry in the in-memory + saved search cache, so Search stays
+    // accurate immediately after an edit/add without needing to hit the network again.
+    function updateCacheEntry(recipe) {
+      var lightEntry = { id: recipe.id, name: recipe.name, version: recipe.version, category: recipe.category, veg: recipe.veg };
+      var idx = allRecipesCache.findIndex(function(r) { return r.id === recipe.id; });
+      if (idx !== -1) allRecipesCache[idx] = lightEntry;
+      else allRecipesCache.push(lightEntry);
+      allRecipesCache.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(allRecipesCache)); } catch (e) { /* ignore */ }
     }
 
     // ---- NEW RECIPE — add to local batch ----
@@ -495,14 +528,21 @@
     function uploadBatch() {
       if (!batchQueue.length) return;
       setStatus('Uploading ' + batchQueue.length + ' recipe(s)...');
-      var payload = batchQueue.map(function(item) {
+      var queueSnapshot = batchQueue.slice(); // keep a copy — batchQueue gets cleared below
+      var payload = queueSnapshot.map(function(item) {
         return { recipe: item.recipe, photoData: item.photoData };
       });
       callBackend('saveRecipesBatch', { items: payload })
-        .then(function() {
-          setStatus('Uploaded ' + batchQueue.length + " recipe(s) to Atima's Menu Book!");
+        .then(function(results) {
+          setStatus('Uploaded ' + queueSnapshot.length + " recipe(s) to Atima's Menu Book!");
           batchQueue = [];
           renderBatchQueue();
+          // results[i].id is the newly-assigned id for queueSnapshot[i].recipe — merge into the search cache
+          results.forEach(function(res, i) {
+            var recipe = queueSnapshot[i].recipe;
+            recipe.id = res.id;
+            updateCacheEntry(recipe);
+          });
         })
         .catch(function(err) { setStatus('Error uploading: ' + err.message); });
     }
