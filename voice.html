@@ -80,7 +80,7 @@
     <input type="file" id="photoInput" accept="image/*" onchange="previewPhoto()">
     <img id="photoPreview" style="display:none;">
 
-    <button class="big-btn save-btn" onclick="submitTranscript()">Process Recipe</button>
+    <button class="big-btn save-btn" id="processRecipeBtn" onclick="submitTranscript()">Process Recipe</button>
     <div id="status"></div>
 
     <div id="reviewCard"></div>
@@ -147,10 +147,17 @@
       retryCount = retryCount || 0;
       var maxRetries = SAFE_TO_RETRY_ACTIONS.indexOf(action) !== -1 ? 3 : 0;
 
+      // Never let a request hang silently forever — a slow Apps Script cold-start or a
+      // genuinely stuck request both look identical to the user otherwise. 25 seconds is
+      // generous enough for a normal cold start, but bounds the wait clearly.
+      var controller = new AbortController();
+      var timeoutId = setTimeout(function() { controller.abort(); }, 25000);
+
       return fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: action, payload: payload || {} })
+        body: JSON.stringify({ action: action, payload: payload || {} }),
+        signal: controller.signal
       })
       .then(function(res) {
         return res.text().then(function(text) {
@@ -168,6 +175,12 @@
         return data.result;
       })
       .catch(function(err) {
+        if (err.name === 'AbortError') {
+          if (retryCount < maxRetries) {
+            return callBackend(action, payload, retryCount + 1);
+          }
+          throw new Error('This is taking much longer than usual (Apps Script may be starting up cold) — please try again in a moment.');
+        }
         if (err.message === 'NOT_JSON' && retryCount < maxRetries) {
           var delay = 1000 * (retryCount + 1); // 1s, then 2s, then 3s
           return new Promise(function(resolve) { setTimeout(resolve, delay); })
@@ -179,7 +192,8 @@
             : 'This action may or may not have gone through — please check the recipe list before trying again, rather than retrying immediately, to avoid creating a duplicate.');
         }
         throw err;
-      });
+      })
+      .finally(function() { clearTimeout(timeoutId); });
     }
 
     var recognition = null;
@@ -378,10 +392,20 @@
     function submitTranscript() {
       var transcript = document.getElementById('transcript').value.trim();
       if (!transcript) { setStatus('Please speak or type a description first.'); return; }
-      setStatus('Understanding your recipe...');
+
+      var btn = document.getElementById('processRecipeBtn');
+      if (btn.disabled) return; // already processing — ignore a second tap rather than starting an overlapping request
+      btn.disabled = true;
+      btn.textContent = '⏳ Understanding your recipe...';
+      setStatus('This usually takes a few seconds...');
+
       callBackend('parseRecipeWithAI', { transcript: transcript, language: document.getElementById('lang').value })
         .then(onParsed)
-        .catch(function(err) { setStatus('Error: ' + err.message); });
+        .catch(function(err) { setStatus('Error: ' + err.message); })
+        .finally(function() {
+          btn.disabled = false;
+          btn.textContent = 'Process Recipe';
+        });
     }
 
     function onParsed(recipe) {
@@ -424,7 +448,7 @@
         '<label>Method / Steps</label><div id="stepList">' + stepRows + '</div>' +
         '<button class="small-btn" onclick="addStepRow()">+ Add step</button>' +
         '<label>Notes (optional)</label><textarea id="f_notes">' + esc(r.notes || '') + '</textarea>' +
-        '<button class="big-btn save-btn" onclick="' + actionFn + '">' + actionLabel + '</button>' +
+        '<button class="big-btn save-btn" id="formActionBtn" onclick="' + actionFn + '">' + actionLabel + '</button>' +
         (currentMode === 'edit' ? '<button class="big-btn secondary-btn" onclick="cancelEdit()">Cancel Edit</button>' : '') +
         (currentMode === 'edit' ? '<button class="big-btn" style="background:#c0392b;color:#fff;" onclick="deleteRecipeConfirm(\'' + r.id + '\', \'' + esc(r.name) + '\'); cancelEdit();">Delete this recipe</button>' : '') +
         '</div>';
@@ -481,7 +505,11 @@
       var recipe = buildRecipeFromForm();
       if (!recipe.name) { setStatus('Recipe needs a name.'); return; }
 
-      setStatus('Saving...');
+      var btn = document.getElementById('formActionBtn');
+      if (btn && btn.disabled) return; // already saving — ignore a second tap
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving...'; }
+      setStatus('Saving — this action cannot be cancelled once started, to avoid a partial save...');
+
       callBackend('saveRecipe', { recipe: recipe, photoData: currentPhotoData })
         .then(function() {
           setStatus("Updated in Atima's Menu Book!");
@@ -490,7 +518,10 @@
           currentParsed = null;
           updateCacheEntry(recipe); // keep the search list accurate without a network re-fetch
         })
-        .catch(function(err) { setStatus('Error saving: ' + err.message); });
+        .catch(function(err) {
+          setStatus('Error saving: ' + err.message);
+          if (btn) { btn.disabled = false; btn.textContent = 'Update Recipe'; }
+        });
     }
 
     // Adds or updates one entry in the in-memory + saved search cache, so Search stays
@@ -547,7 +578,12 @@
 
     function uploadBatch() {
       if (!batchQueue.length) return;
-      setStatus('Uploading ' + batchQueue.length + ' recipe(s)...');
+      var btn = document.getElementById('uploadAllBtn');
+      if (btn.disabled) return; // already uploading — ignore a second tap
+      btn.disabled = true;
+      btn.textContent = '⏳ Uploading...';
+      setStatus('Uploading ' + batchQueue.length + ' recipe(s) — please wait, this cannot be cancelled once started...');
+
       var queueSnapshot = batchQueue.slice(); // keep a copy — batchQueue gets cleared below
       var payload = queueSnapshot.map(function(item) {
         return { recipe: item.recipe, photoData: item.photoData };
@@ -564,7 +600,11 @@
             updateCacheEntry(recipe);
           });
         })
-        .catch(function(err) { setStatus('Error uploading: ' + err.message); });
+        .catch(function(err) {
+          setStatus('Error uploading: ' + err.message);
+          btn.disabled = false;
+          btn.textContent = 'Upload All (' + batchQueue.length + ')';
+        });
     }
 
     // ---- SEARCH ----
@@ -627,15 +667,24 @@
     }
 
     function editRecipe(id) {
+      // Switch to the Add/Edit tab and show a clear loading state IMMEDIATELY — before the
+      // network call even starts — so tapping Edit always gives instant visible feedback,
+      // even if the actual fetch takes a few seconds.
+      currentMode = 'edit';
+      currentPhotoData = null;
+      showView('add');
+      document.getElementById('transcript').value = '';
+      document.getElementById('photoPreview').style.display = 'none';
+      document.getElementById('detailPanel').innerHTML = '';
+      document.getElementById('reviewCard').innerHTML =
+        '<div class="card" style="border:2px solid #7a2e2e; text-align:center;"><b>⏳ Loading recipe for editing...</b></div>';
+
       callBackend('getRecipeById', { id: id }).then(function(r) {
-        if (!r) return;
-        currentMode = 'edit';
+        if (!r) {
+          document.getElementById('reviewCard').innerHTML = '<p style="color:#c00;">Recipe not found — it may have just been deleted.</p>';
+          return;
+        }
         currentParsed = r;
-        currentPhotoData = null;
-        showView('add');
-        document.getElementById('transcript').value = '';
-        document.getElementById('reviewCard').innerHTML = '';
-        document.getElementById('detailPanel').innerHTML = '';
         r.missingFields = [];
         renderReviewForm(r);
         if (r.photoUrl) {
@@ -644,7 +693,8 @@
           img.style.display = 'block';
         }
       }).catch(function(err) {
-        alert('Could not open this recipe for editing: ' + err.message);
+        document.getElementById('reviewCard').innerHTML =
+          '<p style="color:#c00;">Could not open this recipe for editing: ' + esc(err.message) + '</p>';
       });
     }
 
